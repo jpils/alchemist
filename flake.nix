@@ -50,6 +50,9 @@
 					packages = [
 						toolchain
 						pkgs.bacon
+						(pkgs.python3.withPackages (ps: [
+							ps.ase
+						]))
 					];
 
 					# Helps rust-analyzer find std sources
