@@ -37,9 +37,10 @@
 					inherit src;
 					strictDeps = true;
 
-					# Add extra deps here if your crate needs them (openssl, sqlite, etc.)
-					# nativeBuildInputs = [ pkgs.pkg-config ];
-					# buildInputs = [ pkgs.openssl ];
+					# PyO3 needs Python at build time. Runtime UPET deps still come from Pixi.
+					nativeBuildInputs = [ pkgs.pkg-config ];
+					buildInputs = [ pkgs.python3 ];
+					PYO3_PYTHON = "${pkgs.python3}/bin/python3";
 				};
 
 				cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -50,10 +51,24 @@
 					packages = [
 						toolchain
 						pkgs.bacon
+						pkgs.pixi
 					];
 
 					# Helps rust-analyzer find std sources
 					RUST_SRC_PATH = "${tc.rust-src}/lib/rustlib/src/rust/library";
+
+					shellHook = ''
+						PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+						export PYO3_PYTHON="$PROJECT_ROOT/.pixi/envs/default/bin/python"
+						export PYTHONPATH="$PROJECT_ROOT/python:$PYTHONPATH"
+
+						if [ ! -x "$PYO3_PYTHON" ]; then
+							echo "Pixi env missing: $PYO3_PYTHON"
+							echo "Run: pixi install"
+						else
+							echo "PyO3 Python: $PYO3_PYTHON"
+						fi
+					'';
 				};
 
 				packages.default = crate;
