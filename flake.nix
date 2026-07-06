@@ -50,9 +50,7 @@
 					packages = [
 						toolchain
 						pkgs.bacon
-						(pkgs.python3.withPackages (ps: [
-							ps.ase
-						]))
+						pkgs.pixi
 					];
 
 					# Helps rust-analyzer find std sources

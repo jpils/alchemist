@@ -2,35 +2,113 @@ mod lammps;
 mod vasp;
 
 use std::env;
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 use lammps::LammpsManager;
 use vasp::VaspWorkspace;
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+struct Config {
+    project: ProjectConfig,
+    training: TrainingConfig,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectConfig {
+    generations: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct TrainingConfig {
+    backend: Backend,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Backend {
+    Upet,
+    N2p2,
+}
+
+mod watcher;
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let current_working_dir =
+        env::current_dir().expect("Failed to determine current directory");
 
-    if args.len() < 3 {
-        println!("====================================================");
-        println!("❌ Missing Arguments!");
-        println!("Usage:   cargo run -- <path_to_setup_directory> <total_generations>");
+    let setup_dir = current_working_dir.join("setup");
+
+    if !setup_dir.exists() {
+        eprintln!("❌ Could not find setup directory.");
+        eprintln!("Expected:");
+        eprintln!("    {}", setup_dir.display());
         return;
     }
 
-    let setup_dir = Path::new(&args[1]);
-    let total_generations = match args[2].parse::<u32>() {
-        Ok(num) => num,
-        Err(_) => { eprintln!("❌ Error: Total generations must be an integer."); return; }
+    let config_path = setup_dir.join("config.toml");
+
+    let config_text = match fs::read_to_string(&config_path) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("❌ Failed to read {}", config_path.display());
+            eprintln!("{e}");
+            return;
+        }
     };
 
-    // Pre-Flight Asset Validation Loop
+    let config: Config = match toml::from_str(&config_text) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("❌ Invalid config.toml");
+            eprintln!("{e}");
+            return;
+        }
+    };
+
+    let total_generations = config.project.generations;
+
+    // ==========================================================
+    // 🔍 PRE-FLIGHT ASSET VALIDATION LOOP
+    // ==========================================================
     println!("🔍 Performing pre-flight asset validation...");
+    
+    // Check LAMMPS generation files
     for gen_num in 1..=total_generations {
-        if let Err(e) = LammpsManager::find_input_file(setup_dir, gen_num) {
+        if let Err(e) = LammpsManager::find_input_file(&setup_dir, gen_num) {
             println!("❌ PRE-FLIGHT VALIDATION FAILED! Gen {} missing input. Details: {}", gen_num, e);
             return;
         }
     }
-    println!(" ✓ All required LAMMPS files validated successfully.");
+
+    // New: Scan for the foundation model checkpoint (.ckpt) in the setup directory
+    let mut checkpoint_path: Option<PathBuf> = None;
+    if let Ok(entries) = fs::read_dir(&setup_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && path.extension().map_or(false, |ext| ext == "ckpt") {
+                checkpoint_path = Some(path);
+                break; // Stop at the first valid checkpoint found
+            }
+        }
+    }
+
+    let checkpoint_file = match checkpoint_path {
+        Some(path) => {
+            println!(" ✓ Found foundation model checkpoint: {:?}", path.file_name().unwrap());
+            path
+        }
+        None => {
+            println!("====================================================");
+            println!("❌ PRE-FLIGHT VALIDATION FAILED!");
+            println!("Missing model checkpoint file (*.ckpt) inside setup directory: {:?}", setup_dir);
+            println!("🛑 Execution safely aborted before running any simulations.");
+            println!("====================================================");
+            return;
+        }
+    };
+
+    println!(" ✓ All required foundation files validated successfully.");
 
     let current_working_dir = env::current_dir().expect("Failed to get current directory");
     let input_file = current_working_dir.join("filtered_structures.xyz");
@@ -41,7 +119,7 @@ fn main() {
     for gen_num in 1..=total_generations {
         println!("\n🌀 Starting Generation {}/{}...", gen_num, total_generations);
 
-        let lammps_in_file = LammpsManager::find_input_file(setup_dir, gen_num).unwrap();
+        let lammps_in_file = LammpsManager::find_input_file(&setup_dir, gen_num).unwrap();
         println!(" ⚙️  [Placeholder] Launching MD using: {:?}", lammps_in_file.file_name().unwrap());
 
         if !input_file.exists() {
@@ -58,30 +136,67 @@ fn main() {
                 println!(" 🎯 Found {} configurations for Generation {}.", count, gen_num);
                 println!(" 📂 Populating configuration directories...");
 
-                // 1. Generate all the distinct config folders and POSCAR copies
                 for i in 0..count {
                     let run_name = format!("config_{:03}", i);
+                    let run_dir = target_base_dir.join(&run_name);
+
+                    // 1. Setup the directory structure, copy blueprints, and generate POSCAR
                     if let Err(e) = VaspWorkspace::create_run_directory(
                         &run_name,
                         &input_file,
                         &target_base_dir,
-                        setup_dir,
+                        &setup_dir,
                         i,
                     ) {
                         eprintln!("   ❌ Error building frame {}: {}", i, e);
+                        continue;
+                    }
+
+                    // 2. Write the mock OUTCAR file right into the folder (Remove/bypass for production)
+                    if let Err(e) = VaspWorkspace::create_mock_outcar(&run_dir, i) {
+                        eprintln!("   ❌ Error creating mock OUTCAR in {}: {}", run_name, e);
                     }
                 }
 
-                // 2. Generate the single master Job Array script in the parent directory 📜
+                // 3. Generate the master Slurm array file
                 if let Err(e) = VaspWorkspace::create_array_script(&target_base_dir, count) {
                     eprintln!(" ❌ Failed to generate master Slurm array script: {}", e);
                     return;
                 }
 
-                // 3. Print out the single sbatch command for the entire array batch 🚀
                 let array_script = target_base_dir.join("submit_array.sh");
                 println!("   🚀 [Dry-Run] sbatch {:?}", array_script);
                 println!(" ✓ Generation {} processing step complete.", gen_num);
+
+                // ==========================================================
+                // ⚙️ AUTOMATED CONVERSION TRIGGER
+                // ==========================================================
+                println!(" 🔄 Invoking automated extraction and dataset formatting step...");
+
+                let python_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+
+                let python_script_path = match config.training.backend {
+                    Backend::Upet => python_dir.join("poscar_to_upet.py"),
+                    Backend::N2p2 => python_dir.join("poscar_to_n2p2.py"),
+                };
+
+                let convert_status = std::process::Command::new("python3")
+                    .arg(&python_script_path) // Use the resolved absolute path here
+                    .arg(gen_num.to_string())
+                    .arg(&checkpoint_file) 
+                    .status();
+
+                match convert_status {
+                    Ok(status) if status.success() => {
+                        println!("   ✓ Generation {} completely compiled and split successfully.", gen_num);
+                    }
+                    Ok(status) => {
+                        eprintln!("   ⚠️ Python pipeline returned non-zero exit status: {}", status);
+                    }
+                    Err(e) => {
+                        eprintln!("   ❌ Failed to spawn companion extraction engine: {}", e);
+                    }
+                }
             }
             Err(e) => {
                 eprintln!(" ❌ Subsystem failure parsing input file in Gen {}: {}", gen_num, e);
@@ -89,4 +204,4 @@ fn main() {
             }
         }
     }
-}
+}}
