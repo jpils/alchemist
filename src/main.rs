@@ -1,9 +1,14 @@
+#![allow(unused)]
+
 mod lammps;
 mod vasp;
-mod watcher;
 mod paths;
 mod install;
 mod job_template;
+mod types;
+mod slurm_client;
+mod watcher;
+mod pipeline;
 
 use std::fs;
 use std::path::PathBuf;
