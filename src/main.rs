@@ -2,6 +2,7 @@ mod lammps;
 mod vasp;
 mod watcher;
 mod paths;
+mod install;
 
 use std::env;
 use std::fs;
@@ -44,6 +45,15 @@ enum EnergyMode {
 
 
 fn main() {
+
+    let args: Vec<String> = std::env::args().collect();
+
+    if args.len() > 1 && args[1] == "init" {
+        if let Err(e) = install::initialize() {
+            eprintln!("❌ {}", e);
+        }
+        return;
+    }
  
     let project_dir = std::env::current_dir()
         .expect("Failed to determine current working directory");

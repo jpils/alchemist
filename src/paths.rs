@@ -3,28 +3,19 @@ use std::path::PathBuf;
 use std::process::Command;
 
 pub fn scheduler_home() -> Result<PathBuf, Box<dyn Error>> {
-    let mut dir = std::env::current_exe()?;
+    let base = dirs::data_local_dir()
+        .ok_or("Could not determine local data directory")?;
 
-    dir.pop();
+    let scheduler = base.join("ai-scheduler");
 
-    loop {
-        if dir.join("Cargo.toml").exists()
-            && dir.join("pixi.toml").exists()
-            && dir.join("python").is_dir()
-        {
-            return Ok(dir);
-        }
-
-        if !dir.pop() {
-            break;
-        }
+    if scheduler.exists() {
+        Ok(scheduler)
+    } else {
+        Err(
+            "ai-scheduler is not initialized.\nRun `ai_scheduler init` first."
+                .into(),
+        )
     }
-
-    if let Ok(home) = std::env::var("AI_SCHEDULER_HOME") {
-        return Ok(PathBuf::from(home));
-    }
-
-    Err("Could not locate the ai-scheduler installation.".into())
 }
 
 /// Construct a command that executes Python inside the scheduler's
