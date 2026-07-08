@@ -44,10 +44,11 @@ enum EnergyMode {
 
 
 fn main() {
-    let current_working_dir =
-        env::current_dir().expect("Failed to determine current directory");
+ 
+    let project_dir = std::env::current_dir()
+        .expect("Failed to determine current working directory");
 
-    let setup_dir = current_working_dir.join("setup");
+    let setup_dir = project_dir.join("setup");
 
     if !setup_dir.exists() {
         eprintln!("❌ Could not find setup directory.");
@@ -212,6 +213,7 @@ fn main() {
                 let convert_status = pixi_python(pixi_env)
                     .and_then(|mut cmd| {
                         Ok(cmd.arg(&python_script_path)
+                            .arg(&project_dir)
                             .arg(gen_num.to_string())
                             .arg(&checkpoint_file)
                             .arg(energy_mode)

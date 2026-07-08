@@ -61,12 +61,13 @@ def load_reference_energies(checkpoint_path):
         }
 
 
-def load_generation(generation_num):
+def load_generation(project_dir, generation_num):
     """
     Read every OUTCAR belonging to one generation.
     """
 
     base_pattern = os.path.join(
+        project_dir,
         "vasp_runs",
         f"generation_{generation_num}",
         "config_*",
@@ -214,6 +215,7 @@ def split_dataset(dataset):
 
 
 def prepare_dataset(
+    project_dir,
     generation_num,
     checkpoint_path,
     energy_mode: EnergyMode = EnergyMode.PET,
@@ -225,7 +227,10 @@ def prepare_dataset(
         train_set, val_set, test_set
     """
 
-    dataset = load_generation(generation_num)
+    dataset = load_generation(
+        project_dir,
+        generation_num,
+    )
 
     if energy_mode is EnergyMode.PET:
         apply_energy_shift(
@@ -238,8 +243,8 @@ def prepare_dataset(
 
     return split_dataset(dataset)
 
-
 def export_extxyz(
+    project_dir,
     generation_num,
     train_set,
     val_set,
@@ -250,6 +255,7 @@ def export_extxyz(
     """
 
     target_dir = os.path.join(
+        project_dir,
         "training",
         "training_set",
         f"generation_{generation_num}",
