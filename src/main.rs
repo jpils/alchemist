@@ -36,6 +36,22 @@ enum Backend {
     N2p2,
 }
 
+impl Backend {
+    pub fn pixi_env(&self) -> &'static str {
+        match self {
+            Backend::Upet => "upet",
+            Backend::N2p2 => "n2p2",
+        }
+    }
+
+    pub fn python_script(&self) -> &'static str {
+        match self {
+            Backend::Upet => "poscar_to_upet.py",
+            Backend::N2p2 => "poscar_to_n2p2.py",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum EnergyMode {
@@ -204,17 +220,12 @@ fn main() {
 
                 let python_dir = scheduler_dir.join("python");
 
-                let python_script_path = match config.training.backend {
-                    Backend::Upet => python_dir.join("poscar_to_upet.py"),
-                    Backend::N2p2 => python_dir.join("poscar_to_n2p2.py"),
-                };
+                let python_script_path = python_dir.join(
+                    config.training.backend.python_script(),
+                );
 
-                let pixi_env = match config.training.backend {
-                    Backend::Upet => "upet",
-                    Backend::N2p2 => "n2p2",
-                };
+                let pixi_env = config.training.backend.pixi_env();
                
-
                 let energy_mode = match config.training.energy_mode {
                     EnergyMode::Pet => "pet",
                     EnergyMode::Raw => "raw",
