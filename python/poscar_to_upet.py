@@ -3,6 +3,7 @@ import sys
 from dataset import (
     EnergyMode,
     prepare_dataset,
+    split_dataset,
 )
 
 from formats import export_extxyz
@@ -43,11 +44,15 @@ def main():
         f"{checkpoint}"
     )
 
-    train_set, validation_set, test_set = prepare_dataset(
+    dataset = prepare_dataset(
         project_dir,
         generation,
         checkpoint,
         energy_mode,
+    )
+
+    train_set, validation_set, test_set = split_dataset(
+        dataset,
     )
 
     export_extxyz(
@@ -57,7 +62,6 @@ def main():
         validation_set,
         test_set,
     )
-
 
 if __name__ == "__main__":
     main()

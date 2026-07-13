@@ -224,7 +224,7 @@ def prepare_dataset(
     Complete shared workflow.
 
     Returns:
-        train_set, validation_set, test_set
+        dataset
     """
 
     dataset = load_generation(
@@ -241,4 +241,4 @@ def prepare_dataset(
     elif energy_mode is EnergyMode.RAW:
         print("    -> Using raw DFT energies (no energy correction).")
 
-    return split_dataset(dataset)
+    return dataset
