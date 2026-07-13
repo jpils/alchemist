@@ -1,1 +1,21 @@
 /target
+
+# Pixi environment
+.pixi/
+
+# direnv cache
+.direnv/
+
+# Python bytecode
+__pycache__/
+*.py[cod]/target
+
+# Pixi environment
+.pixi/
+
+# direnv cache
+.direnv/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
