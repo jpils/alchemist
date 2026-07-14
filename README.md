@@ -14,4 +14,4 @@ cargo install --path .
 
 cargo run -- init
 
-ai_scheduler
+al_scheduler
