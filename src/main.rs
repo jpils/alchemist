@@ -3,8 +3,8 @@ mod vasp;
 mod watcher;
 mod paths;
 mod install;
+mod job_template;
 
-use std::env;
 use std::fs;
 use std::path::PathBuf;
 use lammps::LammpsManager;
@@ -16,6 +16,7 @@ use paths::{pixi_python, scheduler_home};
 struct Config {
     project: ProjectConfig,
     training: TrainingConfig,
+    committee: CommitteeConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -59,6 +60,10 @@ enum EnergyMode {
     Raw,
 }
 
+#[derive(Debug, Deserialize)]
+struct CommitteeConfig {
+    members: usize,
+}
 
 fn main() {
 
@@ -105,6 +110,28 @@ fn main() {
 
     let total_generations = config.project.generations;
 
+    if config.committee.members == 0 {
+        eprintln!("❌ Invalid committee configuration.");
+        eprintln!("`committee.members` must be greater than zero.");
+        return;
+    }
+
+    let required_job_templates = [
+        setup_dir.join("jobscripts").join("md_array.sh.template"),
+        setup_dir.join("jobscripts").join("vasp_array.sh.template"),
+    ];
+
+    for template_path in required_job_templates {
+        if !template_path.is_file() {
+            eprintln!("❌ PRE-FLIGHT VALIDATION FAILED!");
+            eprintln!(
+                "Missing job template: {}",
+                template_path.display()
+            );
+            return;
+        }
+    }
+
     // ==========================================================
     // 🔍 PRE-FLIGHT ASSET VALIDATION LOOP
     // ==========================================================
@@ -118,53 +145,111 @@ fn main() {
         }
     }
 
-    // New: Scan for the foundation model checkpoint (.ckpt) in the setup directory
-    let mut checkpoint_path: Option<PathBuf> = None;
-    if let Ok(entries) = fs::read_dir(&setup_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() && path.extension().map_or(false, |ext| ext == "ckpt") {
-                checkpoint_path = Some(path);
-                break; // Stop at the first valid checkpoint found
+    let checkpoint_file: Option<PathBuf> = match config.training.energy_mode {
+        EnergyMode::Pet => {
+            let mut checkpoint_path: Option<PathBuf> = None;
+
+            if let Ok(entries) = fs::read_dir(&setup_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+
+                    if path.is_file()
+                        && path
+                            .extension()
+                            .is_some_and(|extension| extension == "ckpt")
+                    {
+                        checkpoint_path = Some(path);
+                        break;
+                    }
+                }
+            }
+
+            match checkpoint_path {
+                Some(path) => {
+                    println!(
+                        " ✓ Found foundation model checkpoint: {:?}",
+                        path.file_name().unwrap_or_default()
+                    );
+
+                    Some(path)
+                }
+
+                None => {
+                    eprintln!("====================================================");
+                    eprintln!("❌ PRE-FLIGHT VALIDATION FAILED!");
+                    eprintln!(
+                        "Energy mode 'pet' requires a checkpoint (*.ckpt) in:"
+                    );
+                    eprintln!("    {}", setup_dir.display());
+                    eprintln!(
+                        "Set `energy_mode = \"raw\"` if no PET correction is required."
+                    );
+                    eprintln!("====================================================");
+                    return;
+                }
             }
         }
-    }
 
-    let checkpoint_file = match checkpoint_path {
-        Some(path) => {
-            println!(" ✓ Found foundation model checkpoint: {:?}", path.file_name().unwrap());
-            path
-        }
-        None => {
-            println!("====================================================");
-            println!("❌ PRE-FLIGHT VALIDATION FAILED!");
-            println!("Missing model checkpoint file (*.ckpt) inside setup directory: {:?}", setup_dir);
-            println!("🛑 Execution safely aborted before running any simulations.");
-            println!("====================================================");
-            return;
+        EnergyMode::Raw => {
+            println!(
+                " ✓ Raw energy mode selected; no PET checkpoint is required."
+            );
+
+            None
         }
     };
 
     println!(" ✓ All required foundation files validated successfully.");
 
-    let current_working_dir = env::current_dir().expect("Failed to get current directory");
-    let input_file = current_working_dir.join("filtered_structures.xyz");
-
+    let input_file = project_dir.join("filtered_structures.xyz");
     // ==========================================================
     // 🔄 THE MASTER GENERATION LOOP
     // ==========================================================
     for gen_num in 1..=total_generations {
         println!("\n🌀 Starting Generation {}/{}...", gen_num, total_generations);
 
-        let lammps_in_file = LammpsManager::find_input_file(&setup_dir, gen_num).unwrap();
-        println!(" ⚙️  [Placeholder] Launching MD using: {:?}", lammps_in_file.file_name().unwrap());
+        println!(
+            " ⚙️  Preparing {} committee MD runs...",
+            config.committee.members
+        );
+
+        let md_generation_dir =
+            match LammpsManager::create_generation_workspace(
+                &project_dir,
+                &setup_dir,
+                gen_num,
+                config.committee.members,
+            ) {
+                Ok(path) => path,
+                Err(e) => {
+                    eprintln!(
+                        " ❌ Failed to prepare MD runs for Generation {}: {}",
+                        gen_num,
+                        e
+                    );
+                    return;
+                }
+            };
+
+        let md_array_script = md_generation_dir.join("submit_array.sh");
+
+        println!(
+            " 🚀 [Dry-Run] sbatch {:?}",
+            md_array_script
+        );
+
+        println!(
+            " ✓ Prepared {} MD runs for Generation {}.",
+            config.committee.members,
+            gen_num
+        );
 
         if !input_file.exists() {
             println!(" ⚠️  Generation {} Halted: 'filtered_structures.xyz' not found!", gen_num);
             return;
         }
 
-        let target_base_dir = current_working_dir
+        let target_base_dir = project_dir
             .join("vasp_runs")
             .join(format!("generation_{}", gen_num));
 
@@ -196,8 +281,16 @@ fn main() {
                 }
 
                 // 3. Generate the master Slurm array file
-                if let Err(e) = VaspWorkspace::create_array_script(&target_base_dir, count) {
-                    eprintln!(" ❌ Failed to generate master Slurm array script: {}", e);
+                if let Err(e) = VaspWorkspace::create_array_script(
+                    &setup_dir,
+                    &target_base_dir,
+                    gen_num,
+                    count,
+                ) {
+                    eprintln!(
+                        " ❌ Failed to generate master Slurm array script: {}",
+                        e
+                    );
                     return;
                 }
 
@@ -236,7 +329,11 @@ fn main() {
                         Ok(cmd.arg(&python_script_path)
                             .arg(&project_dir)
                             .arg(gen_num.to_string())
-                            .arg(&checkpoint_file)
+                            .arg(
+                                checkpoint_file
+                                    .as_deref()
+                                    .unwrap_or_else(|| std::path::Path::new(""))
+                            )
                             .arg(energy_mode)
                             .status())
                     });

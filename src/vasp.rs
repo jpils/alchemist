@@ -1,7 +1,8 @@
-use std::fs::{create_dir_all, File};
-use std::io::{self, Error, ErrorKind, Write};
-use std::path::Path;
+use std::fs::create_dir_all;
+use std::io::{self, Error, ErrorKind};
+use std::path::{Path, PathBuf};
 use crate::paths::{pixi_python, scheduler_home};
+use crate::job_template::render_job_template;
 
 pub struct VaspWorkspace;
 
@@ -227,39 +228,43 @@ impl VaspWorkspace {
     }
 
     /// Generates a single master Slurm Job Array script for the entire generation.
-    pub fn create_array_script(generation_dir: &Path, count: usize) -> io::Result<()> {
+    pub fn create_array_script(
+        setup_dir: &Path,
+        generation_dir: &Path,
+        generation: u32,
+        count: usize,
+    ) -> io::Result<PathBuf> {
         if count == 0 {
-            return Err(Error::new(ErrorKind::InvalidInput, "Cannot create an array script for 0 configurations."));
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "Cannot create a VASP array script for zero configurations.",
+            ));
         }
 
-        let array_script_path = generation_dir.join("submit_array.sh");
-        let mut file = File::create(&array_script_path)?;
+        let template_path = setup_dir
+            .join("jobscripts")
+            .join("vasp_array.sh.template");
 
-        // Slurm array indices are inclusive (e.g., 50 structures means index 0 to 49)
+        if !template_path.is_file() {
+            return Err(Error::new(
+                ErrorKind::NotFound,
+                format!(
+                    "Missing VASP job template: {}",
+                    template_path.display()
+                ),
+            ));
+        }
+
+        let script_path = generation_dir.join("submit_array.sh");
         let max_index = count - 1;
 
-        // Note the use of %a which Slurm replaces with the padded task ID for logging
-        let script_content = format!(
-            r#"#!/bin/bash
-#SBATCH --job-name=vasp_array
-#SBATCH --output=config_%a/vasp.out
-#SBATCH --error=config_%a/vasp.err
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=24
-#SBATCH --time=02:00:00
-#SBATCH --array=0-{}
+        render_job_template(
+            &template_path,
+            &script_path,
+            generation,
+            max_index,
+        )?;
 
-# Map the 0-indexed task ID to our 3-digit padded folder string (e.g., 3 -> config_003)
-DIR=$(printf "config_%03d" $SLURM_ARRAY_TASK_ID)
-
-# Jump into the specific configuration folder and execute VASP
-cd $DIR
-srun vasp_std
-"#,
-            max_index
-        );
-
-        file.write_all(script_content.as_bytes())?;
-        Ok(())
+        Ok(script_path)
     }
 }
