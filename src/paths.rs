@@ -25,18 +25,14 @@ fn repository_root() -> Result<PathBuf, Box<dyn Error>> {
 }
 
 fn installed_home() -> Result<PathBuf, Box<dyn Error>> {
-    let base = dirs::data_local_dir()
-        .ok_or("Could not determine local data directory")?;
+    let base = dirs::data_local_dir().ok_or("Could not determine local data directory")?;
 
     let scheduler = base.join("ai-scheduler");
 
     if scheduler.exists() {
         Ok(scheduler)
     } else {
-        Err(
-            "ai-scheduler is not initialized.\nRun `cargo run -- init` first."
-                .into(),
-        )
+        Err("ai-scheduler is not initialized.\nRun `cargo run -- init` first.".into())
     }
 }
 
@@ -57,7 +53,7 @@ pub fn scheduler_home() -> Result<PathBuf, Box<dyn Error>> {
 
 /// Construct a command that executes Python inside the scheduler's
 /// Pixi environment.
-pub fn pixi_python(environment: &str) -> Result<Command, Box<dyn Error>>{
+pub fn pixi_python(environment: &str) -> Result<Command, Box<dyn Error>> {
     let scheduler = scheduler_home()?;
 
     let mut cmd = Command::new("pixi");

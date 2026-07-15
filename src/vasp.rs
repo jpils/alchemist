@@ -1,8 +1,8 @@
+use crate::job_template::render_job_template;
+use crate::paths::{pixi_python, scheduler_home};
 use std::fs::create_dir_all;
 use std::io::{self, Error, ErrorKind};
 use std::path::{Path, PathBuf};
-use crate::paths::{pixi_python, scheduler_home};
-use crate::job_template::render_job_template;
 
 pub struct VaspWorkspace;
 
@@ -22,14 +22,19 @@ impl VaspWorkspace {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(Error::new(ErrorKind::Other, format!("Failed to count configurations: {}", stderr.trim())));
+            return Err(Error::new(
+                ErrorKind::Other,
+                format!("Failed to count configurations: {}", stderr.trim()),
+            ));
         }
 
         let count_str = String::from_utf8_lossy(&output.stdout);
-        count_str
-            .trim()
-            .parse::<usize>()
-            .map_err(|e| Error::new(ErrorKind::InvalidData, format!("Invalid integer count: {}", e)))
+        count_str.trim().parse::<usize>().map_err(|e| {
+            Error::new(
+                ErrorKind::InvalidData,
+                format!("Invalid integer count: {}", e),
+            )
+        })
     }
 
     pub fn create_run_directory(
@@ -132,11 +137,7 @@ impl VaspWorkspace {
             total_atoms = 144;
 
             // Swapped to S then Cu
-            vrhfin = concat!(
-                "   VRHFIN =S:\n",
-                "   VRHFIN =Cu:\n",
-            )
-            .to_string();
+            vrhfin = concat!("   VRHFIN =S:\n", "   VRHFIN =Cu:\n",).to_string();
 
             potcar = concat!(
                 " POTCAR:    PAW_PBE S 01Jan2000\n",
@@ -167,7 +168,7 @@ impl VaspWorkspace {
         // OUTCAR
         // ----------------------------
         let outcar = format!(
-    r#"vasp.6.4.0 64bit
+            r#"vasp.6.4.0 64bit
 
     {potcar}{vrhfin}{ions_per_type}
 
@@ -241,29 +242,19 @@ impl VaspWorkspace {
             ));
         }
 
-        let template_path = setup_dir
-            .join("jobscripts")
-            .join("vasp_array.sh.template");
+        let template_path = setup_dir.join("jobscripts").join("vasp_array.sh.template");
 
         if !template_path.is_file() {
             return Err(Error::new(
                 ErrorKind::NotFound,
-                format!(
-                    "Missing VASP job template: {}",
-                    template_path.display()
-                ),
+                format!("Missing VASP job template: {}", template_path.display()),
             ));
         }
 
         let script_path = generation_dir.join("submit_array.sh");
         let max_index = count - 1;
 
-        render_job_template(
-            &template_path,
-            &script_path,
-            generation,
-            max_index,
-        )?;
+        render_job_template(&template_path, &script_path, generation, max_index)?;
 
         Ok(script_path)
     }

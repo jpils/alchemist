@@ -7,8 +7,9 @@ use std::path::PathBuf;
 /// Linux:
 /// ~/.local/share/ai-scheduler
 pub fn install_dir() -> io::Result<PathBuf> {
-    let base = dirs::data_local_dir()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Could not determine data directory"))?;
+    let base = dirs::data_local_dir().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::Other, "Could not determine data directory")
+    })?;
 
     Ok(base.join("ai-scheduler"))
 }
@@ -89,10 +90,7 @@ pub fn initialize() -> io::Result<()> {
     println!("Installing into");
     println!("  {}", install_dir.display());
 
-    copy_directory(
-        &repository.join("python"),
-        &install_dir.join("python"),
-    )?;
+    copy_directory(&repository.join("python"), &install_dir.join("python"))?;
 
     copy_file(
         &repository.join("pixi.toml"),

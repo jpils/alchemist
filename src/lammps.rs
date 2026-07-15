@@ -1,6 +1,6 @@
+use crate::job_template::render_job_template;
 use std::fs;
 use std::path::{Path, PathBuf};
-use crate::job_template::render_job_template;
 
 pub struct LammpsManager;
 
@@ -10,10 +10,7 @@ impl LammpsManager {
     /// Rules:
     /// - If exactly one `.in` file exists, use it for every generation.
     /// - If multiple `.in` files exist, require `gen_<generation>.in`.
-    pub fn find_input_file(
-        setup_dir: &Path,
-        gen_num: u32,
-    ) -> Result<PathBuf, String> {
+    pub fn find_input_file(setup_dir: &Path, gen_num: u32) -> Result<PathBuf, String> {
         let in_dir = setup_dir.join("in");
 
         if !in_dir.is_dir() {
@@ -35,18 +32,12 @@ impl LammpsManager {
 
         for entry in entries {
             let entry = entry.map_err(|e| {
-                format!(
-                    "Failed to inspect an entry in {}: {}",
-                    in_dir.display(),
-                    e
-                )
+                format!("Failed to inspect an entry in {}: {}", in_dir.display(), e)
             })?;
 
             let path = entry.path();
 
-            if path.is_file()
-                && path.extension().is_some_and(|extension| extension == "in")
-            {
+            if path.is_file() && path.extension().is_some_and(|extension| extension == "in") {
                 in_files.push(path);
             }
         }
@@ -87,9 +78,7 @@ impl LammpsManager {
         committee_members: usize,
     ) -> Result<PathBuf, String> {
         if committee_members == 0 {
-            return Err(
-                "The committee must contain at least one member.".to_string()
-            );
+            return Err("The committee must contain at least one member.".to_string());
         }
 
         let input_file = Self::find_input_file(setup_dir, gen_num)?;
@@ -128,11 +117,7 @@ impl LammpsManager {
                 .join(&member_name);
 
             // Copy the generation-specific LAMMPS input into the run directory.
-            fs::copy(
-                &input_file,
-                run_dir.join("input.lmp"),
-            )
-            .map_err(|e| {
+            fs::copy(&input_file, run_dir.join("input.lmp")).map_err(|e| {
                 format!(
                     "Failed to copy {} into {}: {}",
                     input_file.display(),
@@ -146,13 +131,7 @@ impl LammpsManager {
                 run_dir.join("driver_member.txt"),
                 format!("{member_name}\n"),
             )
-            .map_err(|e| {
-                format!(
-                    "Failed to write driver information for {}: {}",
-                    run_name,
-                    e
-                )
-            })?;
+            .map_err(|e| format!("Failed to write driver information for {}: {}", run_name, e))?;
 
             // Record the expected model directory.
             //
@@ -162,21 +141,10 @@ impl LammpsManager {
                 run_dir.join("driver_model_path.txt"),
                 format!("{}\n", model_dir.display()),
             )
-            .map_err(|e| {
-                format!(
-                    "Failed to write model path for {}: {}",
-                    run_name,
-                    e
-                )
-            })?;
+            .map_err(|e| format!("Failed to write model path for {}: {}", run_name, e))?;
         }
 
-        Self::create_md_array_script(
-            setup_dir,
-            &generation_dir,
-            gen_num,
-            committee_members,
-        )?;
+        Self::create_md_array_script(setup_dir, &generation_dir, gen_num, committee_members)?;
 
         Ok(generation_dir)
     }
@@ -189,15 +157,10 @@ impl LammpsManager {
         committee_members: usize,
     ) -> Result<PathBuf, String> {
         if committee_members == 0 {
-            return Err(
-                "Cannot create an MD array for zero committee members."
-                    .to_string(),
-            );
+            return Err("Cannot create an MD array for zero committee members.".to_string());
         }
 
-        let template_path = setup_dir
-            .join("jobscripts")
-            .join("md_array.sh.template");
+        let template_path = setup_dir.join("jobscripts").join("md_array.sh.template");
 
         if !template_path.is_file() {
             return Err(format!(
@@ -209,13 +172,7 @@ impl LammpsManager {
         let max_index = committee_members - 1;
         let script_path = generation_dir.join("submit_array.sh");
 
-        render_job_template(
-            &template_path,
-            &script_path,
-            gen_num,
-            max_index,
-        )
-        .map_err(|error| {
+        render_job_template(&template_path, &script_path, gen_num, max_index).map_err(|error| {
             format!(
                 "Failed to render MD job template {}: {}",
                 template_path.display(),
