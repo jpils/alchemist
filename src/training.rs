@@ -125,6 +125,49 @@ impl TrainingWorkspace {
 
         Ok(job_script)
     }
+
+    pub fn create_mock_upet_models(
+        project_dir: &Path,
+        generation: u32,
+        committee_members: usize,
+    ) -> Result<(), String> {
+        if committee_members == 0 {
+            return Err("Cannot create mock UPET models for zero committee members.".to_string());
+        }
+
+        let models_dir = project_dir
+            .join("training")
+            .join(format!("generation_{generation}"))
+            .join("models");
+
+        for member_index in 0..committee_members {
+            let member_name = format!("member_{member_index:03}");
+            let member_dir = models_dir.join(&member_name);
+
+            if !member_dir.is_dir() {
+                return Err(format!(
+                    "UPET member directory does not exist: {}",
+                    member_dir.display()
+                ));
+            }
+
+            let mock_model = member_dir.join("mock_trained_model.pt");
+
+            fs::write(
+                &mock_model,
+                format!("mock UPET model for generation {generation}, {member_name}\n"),
+            )
+            .map_err(|error| {
+                format!(
+                    "Failed to create mock UPET model {}: {}",
+                    mock_model.display(),
+                    error
+                )
+            })?;
+        }
+
+        Ok(())
+    }
 }
 
 fn absolute_path_string(path: &Path) -> Result<String, String> {

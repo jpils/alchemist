@@ -10,7 +10,7 @@ use lammps::LammpsManager;
 use paths::{pixi_python, scheduler_home};
 use serde::Deserialize;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use training::TrainingWorkspace;
 use vasp::VaspWorkspace;
 
@@ -81,6 +81,37 @@ impl EnergyMode {
 #[derive(Debug, Deserialize)]
 struct CommitteeConfig {
     members: usize,
+}
+
+fn prepare_training_dataset(
+    project_dir: &Path,
+    generation: u32,
+    backend: Backend,
+    checkpoint_file: Option<&Path>,
+    energy_mode: EnergyMode,
+) -> Result<(), String> {
+    let scheduler_dir = scheduler_home().map_err(|error| error.to_string())?;
+    let python_script_path = scheduler_dir.join("python").join(backend.python_script());
+    let checkpoint_arg = checkpoint_file.unwrap_or_else(|| Path::new(""));
+
+    let status = pixi_python(backend.pixi_env())
+        .map_err(|error| format!("Failed to configure Pixi: {}", error))?
+        .arg(&python_script_path)
+        .arg(project_dir)
+        .arg(generation.to_string())
+        .arg(checkpoint_arg)
+        .arg(energy_mode.as_str())
+        .status()
+        .map_err(|error| format!("Failed to spawn companion dataset engine: {}", error))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Python dataset pipeline returned non-zero exit status: {}",
+            status
+        ))
+    }
 }
 
 fn main() {
@@ -170,6 +201,43 @@ fn main() {
     // ==========================================================
     println!("🔍 Performing pre-flight asset validation...");
 
+    let seed_dataset = {
+        let extxyz = setup_dir.join("training").join("seed_dataset.extxyz");
+        let xyz = setup_dir.join("training").join("seed_dataset.xyz");
+
+        if extxyz.is_file() {
+            extxyz
+        } else if xyz.is_file() {
+            xyz
+        } else {
+            eprintln!("❌ PRE-FLIGHT VALIDATION FAILED!");
+            eprintln!("Missing seed dataset. Expected one of:");
+            eprintln!("    {}", extxyz.display());
+            eprintln!("    {}", xyz.display());
+            return;
+        }
+    };
+
+    println!(" ✓ Found seed dataset: {}", seed_dataset.display());
+
+    for vasp_input in ["INCAR", "KPOINTS", "POTCAR"] {
+        let path = setup_dir.join("vasp").join(vasp_input);
+
+        if !path.is_file() {
+            eprintln!("❌ PRE-FLIGHT VALIDATION FAILED!");
+            eprintln!("Missing VASP input: {}", path.display());
+            return;
+        }
+    }
+
+    let lammps_data = setup_dir.join("lammps").join("data").join("lmp.data");
+
+    if !lammps_data.is_file() {
+        eprintln!("❌ PRE-FLIGHT VALIDATION FAILED!");
+        eprintln!("Missing LAMMPS data file: {}", lammps_data.display());
+        return;
+    }
+
     // Check LAMMPS generation files
     for gen_num in 1..=total_generations {
         if let Err(e) = LammpsManager::find_input_file(&setup_dir, gen_num) {
@@ -186,8 +254,9 @@ fn main() {
 
     let checkpoint_file: Option<PathBuf> = if checkpoint_required {
         let mut checkpoint_path = None;
+        let training_setup_dir = setup_dir.join("training");
 
-        if let Ok(entries) = fs::read_dir(&setup_dir) {
+        if let Ok(entries) = fs::read_dir(&training_setup_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
 
@@ -217,7 +286,7 @@ fn main() {
                 eprintln!(
                     "UPET training and PET energy correction require a foundation checkpoint in:"
                 );
-                eprintln!("    {}", setup_dir.display());
+                eprintln!("    {}", training_setup_dir.display());
                 return;
             }
         }
@@ -229,7 +298,6 @@ fn main() {
 
     println!(" ✓ All required foundation files validated successfully.");
 
-    let input_file = project_dir.join("filtered_structures.xyz");
     // ==========================================================
     // 🔄 THE MASTER GENERATION LOOP
     // ==========================================================
@@ -238,6 +306,77 @@ fn main() {
             "\n🌀 Starting Generation {}/{}...",
             gen_num, total_generations
         );
+
+        // ==========================================================
+        // ⚙️ DATASET PREPARATION
+        // ==========================================================
+        println!(
+            " 🔄 Preparing accumulated dataset for Generation {}...",
+            gen_num
+        );
+
+        match prepare_training_dataset(
+            &project_dir,
+            gen_num,
+            config.training.backend,
+            checkpoint_file.as_deref(),
+            config.training.energy_mode,
+        ) {
+            Ok(()) => {
+                println!(" ✓ Generation {} dataset exported successfully.", gen_num);
+            }
+            Err(error) => {
+                eprintln!(" ❌ {}", error);
+                return;
+            }
+        }
+
+        if matches!(config.training.backend, Backend::Upet) {
+            let checkpoint = match checkpoint_file.as_deref() {
+                Some(path) => path,
+
+                None => {
+                    eprintln!(" ❌ UPET training requires a checkpoint.");
+                    return;
+                }
+            };
+
+            println!(" 🧠 Preparing UPET committee training workspace...");
+
+            match TrainingWorkspace::create_upet_workspace(
+                &project_dir,
+                &setup_dir,
+                gen_num,
+                config.committee.members,
+                checkpoint,
+                config.training.energy_mode.training_key(),
+            ) {
+                Ok(training_script) => {
+                    println!(" 🚀 [Dry-Run] sbatch {:?}", training_script);
+
+                    if let Err(error) = TrainingWorkspace::create_mock_upet_models(
+                        &project_dir,
+                        gen_num,
+                        config.committee.members,
+                    ) {
+                        eprintln!(" ❌ Failed to create mock UPET models: {}", error);
+                        return;
+                    }
+
+                    println!(" ✓ Created mock UPET trained models.");
+
+                    println!(
+                        " ✓ Prepared {} UPET training jobs for Generation {}.",
+                        config.committee.members, gen_num
+                    );
+                }
+
+                Err(error) => {
+                    eprintln!(" ❌ Failed to prepare UPET training workspace: {}", error);
+                    return;
+                }
+            }
+        }
 
         println!(
             " ⚙️  Preparing {} committee MD runs...",
@@ -249,6 +388,7 @@ fn main() {
             &setup_dir,
             gen_num,
             config.committee.members,
+            matches!(config.training.backend, Backend::Upet),
         ) {
             Ok(path) => path,
             Err(e) => {
@@ -269,10 +409,15 @@ fn main() {
             config.committee.members, gen_num
         );
 
-        if !input_file.exists() {
+        let selected_structures = project_dir
+            .join("selected_structures")
+            .join(format!("generation_{}.xyz", gen_num));
+
+        if !selected_structures.is_file() {
             println!(
-                " ⚠️  Generation {} Halted: 'filtered_structures.xyz' not found!",
-                gen_num
+                " ⚠️  Generation {} Halted: selected structures file not found: {}",
+                gen_num,
+                selected_structures.display()
             );
             return;
         }
@@ -281,10 +426,10 @@ fn main() {
             .join("vasp_runs")
             .join(format!("generation_{}", gen_num));
 
-        match VaspWorkspace::get_configuration_count(&input_file) {
+        match VaspWorkspace::get_configuration_count(&selected_structures) {
             Ok(count) => {
                 println!(
-                    " 🎯 Found {} configurations for Generation {}.",
+                    " 🎯 Found {} selected configurations for Generation {}.",
                     count, gen_num
                 );
                 println!(" 📂 Populating configuration directories...");
@@ -296,7 +441,7 @@ fn main() {
                     // 1. Setup the directory structure, copy blueprints, and generate POSCAR
                     if let Err(e) = VaspWorkspace::create_run_directory(
                         &run_name,
-                        &input_file,
+                        &selected_structures,
                         &target_base_dir,
                         &setup_dir,
                         i,
@@ -321,106 +466,11 @@ fn main() {
 
                 let array_script = target_base_dir.join("submit_array.sh");
                 println!("   🚀 [Dry-Run] sbatch {:?}", array_script);
-                println!(" ✓ Generation {} processing step complete.", gen_num);
-
-                // ==========================================================
-                // ⚙️ AUTOMATED CONVERSION TRIGGER
-                // ==========================================================
-                println!(" 🔄 Invoking automated extraction and dataset formatting step...");
-
-                let scheduler_dir = match scheduler_home() {
-                    Ok(dir) => dir,
-                    Err(e) => {
-                        eprintln!("❌ {}", e);
-                        return;
-                    }
-                };
-
-                let python_dir = scheduler_dir.join("python");
-
-                let python_script_path = python_dir.join(config.training.backend.python_script());
-
-                let pixi_env = config.training.backend.pixi_env();
-
-                let energy_mode = config.training.energy_mode.as_str();
-
-                let convert_status = pixi_python(pixi_env).and_then(|mut cmd| {
-                    Ok(cmd
-                        .arg(&python_script_path)
-                        .arg(&project_dir)
-                        .arg(gen_num.to_string())
-                        .arg(
-                            checkpoint_file
-                                .as_deref()
-                                .unwrap_or_else(|| std::path::Path::new("")),
-                        )
-                        .arg(energy_mode)
-                        .status())
-                });
-
-                match convert_status {
-                    Ok(Ok(status)) => {
-                        if status.success() {
-                            println!(" ✓ Generation {} dataset exported successfully.", gen_num);
-
-                            if matches!(config.training.backend, Backend::Upet) {
-                                let checkpoint = match checkpoint_file.as_deref() {
-                                    Some(path) => path,
-
-                                    None => {
-                                        eprintln!(" ❌ UPET training requires a checkpoint.");
-                                        return;
-                                    }
-                                };
-
-                                println!(" 🧠 Preparing UPET committee training workspace...");
-
-                                match TrainingWorkspace::create_upet_workspace(
-                                    &project_dir,
-                                    &setup_dir,
-                                    gen_num,
-                                    config.committee.members,
-                                    checkpoint,
-                                    config.training.energy_mode.training_key(),
-                                ) {
-                                    Ok(training_script) => {
-                                        println!(" 🚀 [Dry-Run] sbatch {:?}", training_script);
-
-                                        println!(
-                                            " ✓ Prepared {} UPET training jobs for Generation {}.",
-                                            config.committee.members, gen_num
-                                        );
-                                    }
-
-                                    Err(error) => {
-                                        eprintln!(
-                                            " ❌ Failed to prepare UPET training workspace: {}",
-                                            error
-                                        );
-                                        return;
-                                    }
-                                }
-                            }
-                        } else {
-                            eprintln!(
-                                "   ⚠️ Python pipeline returned non-zero exit status: {}",
-                                status
-                            );
-                        }
-                    }
-
-                    Ok(Err(e)) => {
-                        eprintln!("   ❌ Failed to spawn companion extraction engine: {}", e);
-                    }
-
-                    Err(e) => {
-                        eprintln!("   ❌ Failed to configure Pixi: {}", e);
-                    }
-                }
+                println!(" ✓ Generation {} VASP preparation complete.", gen_num);
             }
             Err(e) => {
                 eprintln!(
-                    " ❌ Subsystem failure parsing input file in Gen {}: {}",
+                    " ❌ Subsystem failure parsing selected structures for Gen {}: {}",
                     gen_num, e
                 );
                 return;

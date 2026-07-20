@@ -11,11 +11,11 @@ impl LammpsManager {
     /// - If exactly one `.in` file exists, use it for every generation.
     /// - If multiple `.in` files exist, require `gen_<generation>.in`.
     pub fn find_input_file(setup_dir: &Path, gen_num: u32) -> Result<PathBuf, String> {
-        let in_dir = setup_dir.join("in");
+        let in_dir = setup_dir.join("lammps").join("in");
 
         if !in_dir.is_dir() {
             return Err(format!(
-                "The 'in/' folder is missing inside the setup directory: {}",
+                "The LAMMPS input folder is missing: {}",
                 in_dir.display()
             ));
         }
@@ -76,12 +76,21 @@ impl LammpsManager {
         setup_dir: &Path,
         gen_num: u32,
         committee_members: usize,
+        copy_upet_models: bool,
     ) -> Result<PathBuf, String> {
         if committee_members == 0 {
             return Err("The committee must contain at least one member.".to_string());
         }
 
         let input_file = Self::find_input_file(setup_dir, gen_num)?;
+        let data_file = setup_dir.join("lammps").join("data").join("lmp.data");
+
+        if !data_file.is_file() {
+            return Err(format!(
+                "The LAMMPS data file is missing: {}",
+                data_file.display()
+            ));
+        }
 
         let generation_dir = project_dir
             .join("md_runs")
@@ -125,6 +134,35 @@ impl LammpsManager {
                     e
                 )
             })?;
+
+            fs::copy(&data_file, run_dir.join("lmp.data")).map_err(|e| {
+                format!(
+                    "Failed to copy {} into {}: {}",
+                    data_file.display(),
+                    run_dir.display(),
+                    e
+                )
+            })?;
+
+            if copy_upet_models {
+                let mock_model = model_dir.join("mock_trained_model.pt");
+
+                if !mock_model.is_file() {
+                    return Err(format!(
+                        "Required mock UPET model is missing: {}",
+                        mock_model.display()
+                    ));
+                }
+
+                fs::copy(&mock_model, run_dir.join("mock_trained_model.pt")).map_err(|e| {
+                    format!(
+                        "Failed to copy {} into {}: {}",
+                        mock_model.display(),
+                        run_dir.display(),
+                        e
+                    )
+                })?;
+            }
 
             // Record the committee member assigned as the MD driver.
             fs::write(

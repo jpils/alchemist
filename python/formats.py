@@ -52,6 +52,8 @@ def export_extxyz(
             validation_set,
             format="extxyz",
         )
+    else:
+        open(validation_path, "w", encoding="utf-8").close()
 
     if test_set:
         ase.io.write(
@@ -59,6 +61,8 @@ def export_extxyz(
             test_set,
             format="extxyz",
         )
+    else:
+        open(test_path, "w", encoding="utf-8").close()
 
     print(
         f"[+] Dataset exported successfully: {target_dir}/"

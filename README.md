@@ -10,6 +10,8 @@ cargo run --manifest-path path/to/Cargo.toml
 
 clone repo
 
+nix develop
+
 cargo install --path .
 
 cargo run -- init

@@ -74,10 +74,11 @@ impl VaspWorkspace {
         }
 
         // Copy the standard VASP input files
+        let vasp_dir = setup_dir.join("vasp");
         let vasp_inputs = ["POTCAR", "INCAR", "KPOINTS"];
 
         for file_name in &vasp_inputs {
-            let source = setup_dir.join(file_name);
+            let source = vasp_dir.join(file_name);
             let target = run_dir.join(file_name);
 
             if source.exists() {

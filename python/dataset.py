@@ -113,6 +113,78 @@ def load_generation(project_dir, generation_num):
     return dataset
 
 
+def find_seed_dataset(project_dir):
+    """
+    Locate the user-provided seed dataset.
+    """
+
+    setup_dir = os.path.join(project_dir, "setup", "training")
+
+    candidates = [
+        os.path.join(setup_dir, "seed_dataset.extxyz"),
+        os.path.join(setup_dir, "seed_dataset.xyz"),
+    ]
+
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+
+    expected = " or ".join(candidates)
+    raise RuntimeError(
+        f"No seed dataset found. Expected {expected}"
+    )
+
+
+def load_seed_dataset(project_dir):
+    """
+    Read the seed dataset used to create generation 1.
+    """
+
+    seed_path = find_seed_dataset(project_dir)
+
+    print(f"[+] Loading seed dataset: {seed_path}")
+
+    dataset = ase.io.read(seed_path, index=":")
+
+    if not isinstance(dataset, list):
+        dataset = [dataset]
+
+    if not dataset:
+        raise RuntimeError(
+            f"Seed dataset contains no configurations: {seed_path}"
+        )
+
+    return dataset
+
+
+def load_accumulated_dataset(project_dir, generation_num):
+    """
+    Build the training dataset for an active-learning generation.
+
+    Generation 1 uses only the user-provided seed dataset.
+    Generation N uses the seed dataset plus VASP results from generations
+    1 through N-1.
+    """
+
+    dataset = load_seed_dataset(project_dir)
+
+    if generation_num == 1:
+        print("[+] Generation 1 dataset source: seed dataset only.")
+        return dataset
+
+    for source_generation in range(1, generation_num):
+        dataset.extend(
+            load_generation(project_dir, source_generation)
+        )
+
+    print(
+        f"[+] Accumulated {len(dataset)} configurations "
+        f"for Generation {generation_num}."
+    )
+
+    return dataset
+
+
 def apply_energy_shift(dataset, checkpoint_path):
     """
     Compute and apply PET reference energy shift.
@@ -227,7 +299,7 @@ def prepare_dataset(
         dataset
     """
 
-    dataset = load_generation(
+    dataset = load_accumulated_dataset(
         project_dir,
         generation_num,
     )
