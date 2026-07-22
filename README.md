@@ -16,4 +16,4 @@ cargo install --path .
 
 cargo run -- init
 
-al_scheduler
+alchemist
