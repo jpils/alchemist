@@ -410,12 +410,63 @@ fn main() {
                 ) {
                     Ok((scaling_script, training_script)) => {
                         println!(" 🚀 [Dry-Run] sbatch {:?}", scaling_script);
-                        println!(" 🚀 [Dry-Run] sbatch {:?}", training_script);
+
+                        if let Err(error) = TrainingWorkspace::create_mock_n2p2_scaling_outputs(
+                            &project_dir,
+                            gen_num,
+                            config.committee.members,
+                        ) {
+                            eprintln!(" ❌ Failed to create mock n2p2 scaling outputs: {}", error);
+                            return;
+                        }
+
+                        println!(" ✓ Created mock n2p2 scaling outputs.");
+
+                        let memory_report = project_dir
+                            .join("training")
+                            .join(format!("generation_{}", gen_num))
+                            .join("n2p2_memory_check.txt");
+                        let generation_dir = project_dir
+                            .join("training")
+                            .join(format!("generation_{}", gen_num));
+
+                        if let Err(error) = TrainingWorkspace::write_n2p2_memory_report(
+                            &generation_dir,
+                            &training_script,
+                            config.committee.members,
+                        ) {
+                            eprintln!(" ❌ Failed to write n2p2 memory check report: {}", error);
+                            return;
+                        }
 
                         println!(
                             " ✓ Prepared {} n2p2 scaling/training workspaces for Generation {}.",
                             config.committee.members, gen_num
                         );
+                        println!(" ✓ n2p2 memory check report: {:?}", memory_report);
+                        println!(" 🚀 [Dry-Run] sbatch {:?}", training_script);
+
+                        if let Err(error) = TrainingWorkspace::create_mock_n2p2_training_outputs(
+                            &project_dir,
+                            gen_num,
+                            config.committee.members,
+                        ) {
+                            eprintln!(" ❌ Failed to create mock n2p2 training outputs: {}", error);
+                            return;
+                        }
+
+                        println!(" ✓ Created mock n2p2 training outputs.");
+
+                        if let Err(error) = TrainingWorkspace::select_n2p2_best_epoch(
+                            &project_dir,
+                            gen_num,
+                            config.committee.members,
+                        ) {
+                            eprintln!(" ❌ Failed to select n2p2 best epoch: {}", error);
+                            return;
+                        }
+
+                        println!(" ✓ Selected n2p2 best epochs and staged model artifacts.");
                     }
 
                     Err(error) => {
@@ -426,10 +477,7 @@ fn main() {
             }
         }
 
-        println!(
-            " ⚙️  Preparing {} committee MD runs...",
-            config.committee.members
-        );
+        println!(" ⚙️  Preparing one MD trajectory run...");
 
         let md_generation_dir = match LammpsManager::create_generation_workspace(
             &project_dir,
@@ -455,10 +503,7 @@ fn main() {
 
         println!(" 🚀 [Dry-Run] sbatch {:?}", md_array_script);
 
-        println!(
-            " ✓ Prepared {} MD runs for Generation {}.",
-            config.committee.members, gen_num
-        );
+        println!(" ✓ Prepared MD run for Generation {}.", gen_num);
 
         let selected_structures = project_dir
             .join("selected_structures")
