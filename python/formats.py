@@ -16,8 +16,8 @@ def export_extxyz(
     target_dir = os.path.join(
         project_dir,
         "training",
-        "training_set",
         f"generation_{generation_num}",
+        "dataset",
     )
 
     os.makedirs(
@@ -25,40 +25,59 @@ def export_extxyz(
         exist_ok=True,
     )
 
+    train_path = os.path.join(
+        target_dir,
+        "train.extxyz",
+    )
+
+    validation_path = os.path.join(
+        target_dir,
+        "validation.extxyz",
+    )
+
+    test_path = os.path.join(
+        target_dir,
+        "test.extxyz",
+    )
+
     ase.io.write(
-        os.path.join(target_dir, "train.xyz"),
+        train_path,
         train_set,
         format="extxyz",
     )
 
     if validation_set:
         ase.io.write(
-            os.path.join(target_dir, "validation.xyz"),
+            validation_path,
             validation_set,
             format="extxyz",
         )
+    else:
+        open(validation_path, "w", encoding="utf-8").close()
 
     if test_set:
         ase.io.write(
-            os.path.join(target_dir, "test.xyz"),
+            test_path,
             test_set,
             format="extxyz",
         )
+    else:
+        open(test_path, "w", encoding="utf-8").close()
 
     print(
         f"[+] Dataset exported successfully: {target_dir}/"
     )
 
     print(
-        f"    - train.xyz : {len(train_set)} frames"
+        f"    - train.extxyz      : {len(train_set)} frames"
     )
 
     print(
-        f"    - validation.xyz   : {len(validation_set)} frames"
+        f"    - validation.extxyz : {len(validation_set)} frames"
     )
 
     print(
-        f"    - test.xyz  : {len(test_set)} frames"
+        f"    - test.extxyz       : {len(test_set)} frames"
     )
 
 def write_runner_structure(file, atoms):
@@ -116,8 +135,8 @@ def export_runner(
     target_dir = os.path.join(
         project_dir,
         "training",
-        "training_set",
         f"generation_{generation_num}",
+        "dataset",
     )
 
     os.makedirs(
@@ -130,13 +149,20 @@ def export_runner(
         "input.data",
     )
 
-    with open(output_file, "w") as file:
-
+    with open(
+        output_file,
+        "w",
+        encoding="utf-8",
+    ) as file:
         for atoms in dataset:
-            write_runner_structure(file, atoms)
+            write_runner_structure(
+                file,
+                atoms,
+            )
 
     print(
-        f"[+] Runner dataset exported successfully: {output_file}"
+        f"[+] Runner dataset exported successfully: "
+        f"{output_file}"
     )
 
     print(

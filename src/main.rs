@@ -1,16 +1,18 @@
-mod lammps;
-mod vasp;
-mod watcher;
-mod paths;
 mod install;
 mod job_template;
+mod lammps;
+mod paths;
+mod training;
+mod vasp;
+mod watcher;
 
-use std::fs;
-use std::path::PathBuf;
-use lammps::LammpsManager;
-use vasp::VaspWorkspace;
-use serde::Deserialize;
+use lammps::{LammpsManager, MdModelPackage};
 use paths::{pixi_python, scheduler_home};
+use serde::Deserialize;
+use std::fs;
+use std::path::{Path, PathBuf};
+use training::TrainingWorkspace;
+use vasp::VaspWorkspace;
 
 #[derive(Debug, Deserialize)]
 struct Config {
@@ -30,7 +32,7 @@ struct TrainingConfig {
     energy_mode: EnergyMode,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 enum Backend {
     Upet,
@@ -53,11 +55,27 @@ impl Backend {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 enum EnergyMode {
     Pet,
     Raw,
+}
+
+impl EnergyMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EnergyMode::Pet => "pet",
+            EnergyMode::Raw => "raw",
+        }
+    }
+
+    pub fn training_key(&self) -> &'static str {
+        match self {
+            EnergyMode::Pet => "energy-corrected",
+            EnergyMode::Raw => "energy",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,8 +83,38 @@ struct CommitteeConfig {
     members: usize,
 }
 
-fn main() {
+fn prepare_training_dataset(
+    project_dir: &Path,
+    generation: u32,
+    backend: Backend,
+    checkpoint_file: Option<&Path>,
+    energy_mode: EnergyMode,
+) -> Result<(), String> {
+    let scheduler_dir = scheduler_home().map_err(|error| error.to_string())?;
+    let python_script_path = scheduler_dir.join("python").join(backend.python_script());
+    let checkpoint_arg = checkpoint_file.unwrap_or_else(|| Path::new(""));
 
+    let status = pixi_python(backend.pixi_env())
+        .map_err(|error| format!("Failed to configure Pixi: {}", error))?
+        .arg(&python_script_path)
+        .arg(project_dir)
+        .arg(generation.to_string())
+        .arg(checkpoint_arg)
+        .arg(energy_mode.as_str())
+        .status()
+        .map_err(|error| format!("Failed to spawn companion dataset engine: {}", error))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Python dataset pipeline returned non-zero exit status: {}",
+            status
+        ))
+    }
+}
+
+fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() > 1 && args[1] == "init" {
@@ -75,9 +123,9 @@ fn main() {
         }
         return;
     }
- 
-    let project_dir = std::env::current_dir()
-        .expect("Failed to determine current working directory");
+
+    let project_dir =
+        std::env::current_dir().expect("Failed to determine current working directory");
 
     let setup_dir = project_dir.join("setup");
 
@@ -124,11 +172,47 @@ fn main() {
     for template_path in required_job_templates {
         if !template_path.is_file() {
             eprintln!("❌ PRE-FLIGHT VALIDATION FAILED!");
-            eprintln!(
-                "Missing job template: {}",
-                template_path.display()
-            );
+            eprintln!("Missing job template: {}", template_path.display());
             return;
+        }
+    }
+
+    if matches!(config.training.backend, Backend::Upet) {
+        let required_upet_templates = [
+            setup_dir.join("training").join("upet.yaml.template"),
+            setup_dir
+                .join("jobscripts")
+                .join("upet_training_array.sh.template"),
+        ];
+
+        for template_path in required_upet_templates {
+            if !template_path.is_file() {
+                eprintln!("❌ PRE-FLIGHT VALIDATION FAILED!");
+
+                eprintln!("Missing UPET template: {}", template_path.display());
+
+                return;
+            }
+        }
+    }
+
+    if matches!(config.training.backend, Backend::N2p2) {
+        let required_n2p2_files = [
+            setup_dir.join("training").join("input.nn"),
+            setup_dir
+                .join("jobscripts")
+                .join("n2p2_scaling_array.sh.template"),
+            setup_dir
+                .join("jobscripts")
+                .join("n2p2_training_array.sh.template"),
+        ];
+
+        for path in required_n2p2_files {
+            if !path.is_file() {
+                eprintln!("❌ PRE-FLIGHT VALIDATION FAILED!");
+                eprintln!("Missing n2p2 setup file: {}", path.display());
+                return;
+            }
         }
     }
 
@@ -136,116 +220,301 @@ fn main() {
     // 🔍 PRE-FLIGHT ASSET VALIDATION LOOP
     // ==========================================================
     println!("🔍 Performing pre-flight asset validation...");
-    
-    // Check LAMMPS generation files
-    for gen_num in 1..=total_generations {
-        if let Err(e) = LammpsManager::find_input_file(&setup_dir, gen_num) {
-            println!("❌ PRE-FLIGHT VALIDATION FAILED! Gen {} missing input. Details: {}", gen_num, e);
+
+    let seed_dataset = {
+        let extxyz = setup_dir.join("training").join("seed_dataset.extxyz");
+        let xyz = setup_dir.join("training").join("seed_dataset.xyz");
+
+        if extxyz.is_file() {
+            extxyz
+        } else if xyz.is_file() {
+            xyz
+        } else {
+            eprintln!("❌ PRE-FLIGHT VALIDATION FAILED!");
+            eprintln!("Missing seed dataset. Expected one of:");
+            eprintln!("    {}", extxyz.display());
+            eprintln!("    {}", xyz.display());
+            return;
+        }
+    };
+
+    println!(" ✓ Found seed dataset: {}", seed_dataset.display());
+
+    for vasp_input in ["INCAR", "KPOINTS", "POTCAR"] {
+        let path = setup_dir.join("vasp").join(vasp_input);
+
+        if !path.is_file() {
+            eprintln!("❌ PRE-FLIGHT VALIDATION FAILED!");
+            eprintln!("Missing VASP input: {}", path.display());
             return;
         }
     }
 
-    let checkpoint_file: Option<PathBuf> = match config.training.energy_mode {
-        EnergyMode::Pet => {
-            let mut checkpoint_path: Option<PathBuf> = None;
+    let lammps_data = setup_dir.join("lammps").join("data").join("lmp.data");
 
-            if let Ok(entries) = fs::read_dir(&setup_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
+    if !lammps_data.is_file() {
+        eprintln!("❌ PRE-FLIGHT VALIDATION FAILED!");
+        eprintln!("Missing LAMMPS data file: {}", lammps_data.display());
+        return;
+    }
 
-                    if path.is_file()
-                        && path
-                            .extension()
-                            .is_some_and(|extension| extension == "ckpt")
-                    {
-                        checkpoint_path = Some(path);
-                        break;
-                    }
-                }
-            }
-
-            match checkpoint_path {
-                Some(path) => {
-                    println!(
-                        " ✓ Found foundation model checkpoint: {:?}",
-                        path.file_name().unwrap_or_default()
-                    );
-
-                    Some(path)
-                }
-
-                None => {
-                    eprintln!("====================================================");
-                    eprintln!("❌ PRE-FLIGHT VALIDATION FAILED!");
-                    eprintln!(
-                        "Energy mode 'pet' requires a checkpoint (*.ckpt) in:"
-                    );
-                    eprintln!("    {}", setup_dir.display());
-                    eprintln!(
-                        "Set `energy_mode = \"raw\"` if no PET correction is required."
-                    );
-                    eprintln!("====================================================");
-                    return;
-                }
-            }
-        }
-
-        EnergyMode::Raw => {
+    // Check LAMMPS generation files
+    for gen_num in 1..=total_generations {
+        if let Err(e) = LammpsManager::find_input_file(&setup_dir, gen_num) {
             println!(
-                " ✓ Raw energy mode selected; no PET checkpoint is required."
+                "❌ PRE-FLIGHT VALIDATION FAILED! Gen {} missing input. Details: {}",
+                gen_num, e
             );
-
-            None
+            return;
         }
+    }
+
+    let checkpoint_required = matches!(config.training.backend, Backend::Upet)
+        || matches!(config.training.energy_mode, EnergyMode::Pet);
+
+    let checkpoint_file: Option<PathBuf> = if checkpoint_required {
+        let mut checkpoint_path = None;
+        let training_setup_dir = setup_dir.join("training");
+
+        if let Ok(entries) = fs::read_dir(&training_setup_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+
+                if path.is_file()
+                    && path
+                        .extension()
+                        .is_some_and(|extension| extension == "ckpt")
+                {
+                    checkpoint_path = Some(path);
+                    break;
+                }
+            }
+        }
+
+        match checkpoint_path {
+            Some(path) => {
+                println!(
+                    " ✓ Found foundation model checkpoint: {:?}",
+                    path.file_name().unwrap_or_default()
+                );
+
+                Some(path)
+            }
+
+            None => {
+                eprintln!("❌ A checkpoint (*.ckpt) is required.");
+                eprintln!(
+                    "UPET training and PET energy correction require a foundation checkpoint in:"
+                );
+                eprintln!("    {}", training_setup_dir.display());
+                return;
+            }
+        }
+    } else {
+        println!(" ✓ No foundation checkpoint is required.");
+
+        None
     };
 
     println!(" ✓ All required foundation files validated successfully.");
 
-    let input_file = project_dir.join("filtered_structures.xyz");
     // ==========================================================
     // 🔄 THE MASTER GENERATION LOOP
     // ==========================================================
     for gen_num in 1..=total_generations {
-        println!("\n🌀 Starting Generation {}/{}...", gen_num, total_generations);
-
         println!(
-            " ⚙️  Preparing {} committee MD runs...",
-            config.committee.members
+            "\n🌀 Starting Generation {}/{}...",
+            gen_num, total_generations
         );
 
-        let md_generation_dir =
-            match LammpsManager::create_generation_workspace(
-                &project_dir,
-                &setup_dir,
-                gen_num,
-                config.committee.members,
-            ) {
-                Ok(path) => path,
-                Err(e) => {
-                    eprintln!(
-                        " ❌ Failed to prepare MD runs for Generation {}: {}",
-                        gen_num,
-                        e
-                    );
-                    return;
-                }
-            };
-
-        let md_array_script = md_generation_dir.join("submit_array.sh");
-
+        // ==========================================================
+        // ⚙️ DATASET PREPARATION
+        // ==========================================================
         println!(
-            " 🚀 [Dry-Run] sbatch {:?}",
-            md_array_script
-        );
-
-        println!(
-            " ✓ Prepared {} MD runs for Generation {}.",
-            config.committee.members,
+            " 🔄 Preparing accumulated dataset for Generation {}...",
             gen_num
         );
 
-        if !input_file.exists() {
-            println!(" ⚠️  Generation {} Halted: 'filtered_structures.xyz' not found!", gen_num);
+        match prepare_training_dataset(
+            &project_dir,
+            gen_num,
+            config.training.backend,
+            checkpoint_file.as_deref(),
+            config.training.energy_mode,
+        ) {
+            Ok(()) => {
+                println!(" ✓ Generation {} dataset exported successfully.", gen_num);
+            }
+            Err(error) => {
+                eprintln!(" ❌ {}", error);
+                return;
+            }
+        }
+
+        match config.training.backend {
+            Backend::Upet => {
+                let checkpoint = match checkpoint_file.as_deref() {
+                    Some(path) => path,
+
+                    None => {
+                        eprintln!(" ❌ UPET training requires a checkpoint.");
+                        return;
+                    }
+                };
+
+                println!(" 🧠 Preparing UPET committee training workspace...");
+
+                match TrainingWorkspace::create_upet_workspace(
+                    &project_dir,
+                    &setup_dir,
+                    gen_num,
+                    config.committee.members,
+                    checkpoint,
+                    config.training.energy_mode.training_key(),
+                ) {
+                    Ok(training_script) => {
+                        println!(" 🚀 [Dry-Run] sbatch {:?}", training_script);
+
+                        if let Err(error) = TrainingWorkspace::create_mock_upet_models(
+                            &project_dir,
+                            gen_num,
+                            config.committee.members,
+                        ) {
+                            eprintln!(" ❌ Failed to create mock UPET models: {}", error);
+                            return;
+                        }
+
+                        println!(" ✓ Created mock UPET trained models.");
+
+                        println!(
+                            " ✓ Prepared {} UPET training jobs for Generation {}.",
+                            config.committee.members, gen_num
+                        );
+                    }
+
+                    Err(error) => {
+                        eprintln!(" ❌ Failed to prepare UPET training workspace: {}", error);
+                        return;
+                    }
+                }
+            }
+
+            Backend::N2p2 => {
+                println!(" 🧠 Preparing n2p2 committee training workspace...");
+
+                match TrainingWorkspace::create_n2p2_workspace(
+                    &project_dir,
+                    &setup_dir,
+                    gen_num,
+                    config.committee.members,
+                ) {
+                    Ok((scaling_script, training_script)) => {
+                        println!(" 🚀 [Dry-Run] sbatch {:?}", scaling_script);
+
+                        if let Err(error) = TrainingWorkspace::create_mock_n2p2_scaling_outputs(
+                            &project_dir,
+                            gen_num,
+                            config.committee.members,
+                        ) {
+                            eprintln!(" ❌ Failed to create mock n2p2 scaling outputs: {}", error);
+                            return;
+                        }
+
+                        println!(" ✓ Created mock n2p2 scaling outputs.");
+
+                        let memory_report = project_dir
+                            .join("training")
+                            .join(format!("generation_{}", gen_num))
+                            .join("n2p2_memory_check.txt");
+                        let generation_dir = project_dir
+                            .join("training")
+                            .join(format!("generation_{}", gen_num));
+
+                        if let Err(error) = TrainingWorkspace::write_n2p2_memory_report(
+                            &generation_dir,
+                            &training_script,
+                            config.committee.members,
+                        ) {
+                            eprintln!(" ❌ Failed to write n2p2 memory check report: {}", error);
+                            return;
+                        }
+
+                        println!(
+                            " ✓ Prepared {} n2p2 scaling/training workspaces for Generation {}.",
+                            config.committee.members, gen_num
+                        );
+                        println!(" ✓ n2p2 memory check report: {:?}", memory_report);
+                        println!(" 🚀 [Dry-Run] sbatch {:?}", training_script);
+
+                        if let Err(error) = TrainingWorkspace::create_mock_n2p2_training_outputs(
+                            &project_dir,
+                            gen_num,
+                            config.committee.members,
+                        ) {
+                            eprintln!(" ❌ Failed to create mock n2p2 training outputs: {}", error);
+                            return;
+                        }
+
+                        println!(" ✓ Created mock n2p2 training outputs.");
+
+                        if let Err(error) = TrainingWorkspace::select_n2p2_best_epoch(
+                            &project_dir,
+                            gen_num,
+                            config.committee.members,
+                        ) {
+                            eprintln!(" ❌ Failed to select n2p2 best epoch: {}", error);
+                            return;
+                        }
+
+                        println!(" ✓ Selected n2p2 best epochs and staged model artifacts.");
+                    }
+
+                    Err(error) => {
+                        eprintln!(" ❌ Failed to prepare n2p2 training workspace: {}", error);
+                        return;
+                    }
+                }
+            }
+        }
+
+        println!(" ⚙️  Preparing one MD trajectory run...");
+
+        let md_generation_dir = match LammpsManager::create_generation_workspace(
+            &project_dir,
+            &setup_dir,
+            gen_num,
+            config.committee.members,
+            match config.training.backend {
+                Backend::Upet => Some(MdModelPackage::UpetMock),
+                Backend::N2p2 => Some(MdModelPackage::N2p2Inputs),
+            },
+        ) {
+            Ok(path) => path,
+            Err(e) => {
+                eprintln!(
+                    " ❌ Failed to prepare MD runs for Generation {}: {}",
+                    gen_num, e
+                );
+                return;
+            }
+        };
+
+        let md_array_script = md_generation_dir.join("submit_array.sh");
+
+        println!(" 🚀 [Dry-Run] sbatch {:?}", md_array_script);
+
+        println!(" ✓ Prepared MD run for Generation {}.", gen_num);
+
+        let selected_structures = project_dir
+            .join("selected_structures")
+            .join(format!("generation_{}.xyz", gen_num));
+
+        if !selected_structures.is_file() {
+            println!(
+                " ⚠️  Generation {} Halted: selected structures file not found: {}",
+                gen_num,
+                selected_structures.display()
+            );
             return;
         }
 
@@ -253,9 +522,12 @@ fn main() {
             .join("vasp_runs")
             .join(format!("generation_{}", gen_num));
 
-        match VaspWorkspace::get_configuration_count(&input_file) {
+        match VaspWorkspace::get_configuration_count(&selected_structures) {
             Ok(count) => {
-                println!(" 🎯 Found {} configurations for Generation {}.", count, gen_num);
+                println!(
+                    " 🎯 Found {} selected configurations for Generation {}.",
+                    count, gen_num
+                );
                 println!(" 📂 Populating configuration directories...");
 
                 for i in 0..count {
@@ -265,7 +537,7 @@ fn main() {
                     // 1. Setup the directory structure, copy blueprints, and generate POSCAR
                     if let Err(e) = VaspWorkspace::create_run_directory(
                         &run_name,
-                        &input_file,
+                        &selected_structures,
                         &target_base_dir,
                         &setup_dir,
                         i,
@@ -281,89 +553,22 @@ fn main() {
                 }
 
                 // 3. Generate the master Slurm array file
-                if let Err(e) = VaspWorkspace::create_array_script(
-                    &setup_dir,
-                    &target_base_dir,
-                    gen_num,
-                    count,
-                ) {
-                    eprintln!(
-                        " ❌ Failed to generate master Slurm array script: {}",
-                        e
-                    );
+                if let Err(e) =
+                    VaspWorkspace::create_array_script(&setup_dir, &target_base_dir, gen_num, count)
+                {
+                    eprintln!(" ❌ Failed to generate master Slurm array script: {}", e);
                     return;
                 }
 
                 let array_script = target_base_dir.join("submit_array.sh");
                 println!("   🚀 [Dry-Run] sbatch {:?}", array_script);
-                println!(" ✓ Generation {} processing step complete.", gen_num);
-
-                // ==========================================================
-                // ⚙️ AUTOMATED CONVERSION TRIGGER
-                // ==========================================================
-                println!(" 🔄 Invoking automated extraction and dataset formatting step...");
-
-                let scheduler_dir = match scheduler_home() {
-                    Ok(dir) => dir,
-                    Err(e) => {
-                        eprintln!("❌ {}", e);
-                        return;
-                    }
-                };
-
-                let python_dir = scheduler_dir.join("python");
-
-                let python_script_path = python_dir.join(
-                    config.training.backend.python_script(),
-                );
-
-                let pixi_env = config.training.backend.pixi_env();
-               
-                let energy_mode = match config.training.energy_mode {
-                    EnergyMode::Pet => "pet",
-                    EnergyMode::Raw => "raw",
-                };
-
-                let convert_status = pixi_python(pixi_env)
-                    .and_then(|mut cmd| {
-                        Ok(cmd.arg(&python_script_path)
-                            .arg(&project_dir)
-                            .arg(gen_num.to_string())
-                            .arg(
-                                checkpoint_file
-                                    .as_deref()
-                                    .unwrap_or_else(|| std::path::Path::new(""))
-                            )
-                            .arg(energy_mode)
-                            .status())
-                    });
-
-                match convert_status {
-                    Ok(Ok(status)) => {
-                        if status.success() {
-                            println!(
-                                " ✓ Generation {} completely compiled and split successfully.",
-                                gen_num
-                            );
-                        } else {
-                            eprintln!(
-                                "   ⚠️ Python pipeline returned non-zero exit status: {}",
-                                status
-                            );
-                        }
-                    }
-
-                    Ok(Err(e)) => {
-                        eprintln!("   ❌ Failed to spawn companion extraction engine: {}", e);
-                    }
-
-                    Err(e) => {
-                        eprintln!("   ❌ Failed to configure Pixi: {}", e);
-                    }
-                }
+                println!(" ✓ Generation {} VASP preparation complete.", gen_num);
             }
             Err(e) => {
-                eprintln!(" ❌ Subsystem failure parsing input file in Gen {}: {}", gen_num, e);
+                eprintln!(
+                    " ❌ Subsystem failure parsing selected structures for Gen {}: {}",
+                    gen_num, e
+                );
                 return;
             }
         }

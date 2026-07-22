@@ -1,8 +1,14 @@
+use crate::job_template::render_job_template;
 use std::fs;
 use std::path::{Path, PathBuf};
-use crate::job_template::render_job_template;
 
 pub struct LammpsManager;
+
+#[derive(Clone, Copy)]
+pub enum MdModelPackage {
+    UpetMock,
+    N2p2Inputs,
+}
 
 impl LammpsManager {
     /// Find the LAMMPS input file for a generation.
@@ -10,15 +16,12 @@ impl LammpsManager {
     /// Rules:
     /// - If exactly one `.in` file exists, use it for every generation.
     /// - If multiple `.in` files exist, require `gen_<generation>.in`.
-    pub fn find_input_file(
-        setup_dir: &Path,
-        gen_num: u32,
-    ) -> Result<PathBuf, String> {
-        let in_dir = setup_dir.join("in");
+    pub fn find_input_file(setup_dir: &Path, gen_num: u32) -> Result<PathBuf, String> {
+        let in_dir = setup_dir.join("lammps").join("in");
 
         if !in_dir.is_dir() {
             return Err(format!(
-                "The 'in/' folder is missing inside the setup directory: {}",
+                "The LAMMPS input folder is missing: {}",
                 in_dir.display()
             ));
         }
@@ -35,18 +38,12 @@ impl LammpsManager {
 
         for entry in entries {
             let entry = entry.map_err(|e| {
-                format!(
-                    "Failed to inspect an entry in {}: {}",
-                    in_dir.display(),
-                    e
-                )
+                format!("Failed to inspect an entry in {}: {}", in_dir.display(), e)
             })?;
 
             let path = entry.path();
 
-            if path.is_file()
-                && path.extension().is_some_and(|extension| extension == "in")
-            {
+            if path.is_file() && path.extension().is_some_and(|extension| extension == "in") {
                 in_files.push(path);
             }
         }
@@ -79,20 +76,27 @@ impl LammpsManager {
 
     /// Create the MD committee workspace for one active-learning generation.
     ///
-    /// One MD run is created per committee member.
+    /// One trajectory-producing MD run is created per generation.
     pub fn create_generation_workspace(
         project_dir: &Path,
         setup_dir: &Path,
         gen_num: u32,
         committee_members: usize,
+        model_package: Option<MdModelPackage>,
     ) -> Result<PathBuf, String> {
         if committee_members == 0 {
-            return Err(
-                "The committee must contain at least one member.".to_string()
-            );
+            return Err("The committee must contain at least one member.".to_string());
         }
 
         let input_file = Self::find_input_file(setup_dir, gen_num)?;
+        let data_file = setup_dir.join("lammps").join("data").join("lmp.data");
+
+        if !data_file.is_file() {
+            return Err(format!(
+                "The LAMMPS data file is missing: {}",
+                data_file.display()
+            ));
+        }
 
         let generation_dir = project_dir
             .join("md_runs")
@@ -106,77 +110,232 @@ impl LammpsManager {
             )
         })?;
 
-        for run_index in 0..committee_members {
-            let run_name = format!("run_{:03}", run_index);
-            let run_dir = generation_dir.join(&run_name);
+        let run_dir = generation_dir.join("run_000");
 
-            fs::create_dir_all(&run_dir).map_err(|e| {
-                format!(
-                    "Failed to create MD run directory {}: {}",
-                    run_dir.display(),
-                    e
-                )
-            })?;
+        fs::create_dir_all(&run_dir).map_err(|e| {
+            format!(
+                "Failed to create MD run directory {}: {}",
+                run_dir.display(),
+                e
+            )
+        })?;
 
-            // Each run is driven by the corresponding committee member.
-            let member_name = format!("member_{:03}", run_index);
+        fs::copy(&input_file, run_dir.join("input.lmp")).map_err(|e| {
+            format!(
+                "Failed to copy {} into {}: {}",
+                input_file.display(),
+                run_dir.display(),
+                e
+            )
+        })?;
 
+        fs::copy(&data_file, run_dir.join("lmp.data")).map_err(|e| {
+            format!(
+                "Failed to copy {} into {}: {}",
+                data_file.display(),
+                run_dir.display(),
+                e
+            )
+        })?;
+
+        let committee_models_dir = generation_dir.join("committee_models");
+
+        fs::create_dir_all(&committee_models_dir).map_err(|e| {
+            format!(
+                "Failed to create committee model package directory {}: {}",
+                committee_models_dir.display(),
+                e
+            )
+        })?;
+
+        for member_index in 0..committee_members {
+            let member_name = format!("member_{:03}", member_index);
             let model_dir = project_dir
                 .join("training")
                 .join(format!("generation_{}", gen_num))
                 .join("models")
                 .join(&member_name);
+            let member_package_dir = committee_models_dir.join(&member_name);
 
-            // Copy the generation-specific LAMMPS input into the run directory.
-            fs::copy(
-                &input_file,
-                run_dir.join("input.lmp"),
-            )
-            .map_err(|e| {
-                format!(
-                    "Failed to copy {} into {}: {}",
-                    input_file.display(),
-                    run_dir.display(),
-                    e
-                )
-            })?;
+            match model_package {
+                Some(MdModelPackage::UpetMock) => {
+                    fs::create_dir_all(&member_package_dir).map_err(|e| {
+                        format!(
+                            "Failed to create UPET model package directory {}: {}",
+                            member_package_dir.display(),
+                            e
+                        )
+                    })?;
 
-            // Record the committee member assigned as the MD driver.
-            fs::write(
-                run_dir.join("driver_member.txt"),
-                format!("{member_name}\n"),
-            )
-            .map_err(|e| {
-                format!(
-                    "Failed to write driver information for {}: {}",
-                    run_name,
-                    e
-                )
-            })?;
+                    let mock_model = model_dir.join("mock_trained_model.pt");
 
-            // Record the expected model directory.
-            //
-            // We do not inject this path into the LAMMPS input yet because
-            // UPET and n2p2 use different pair-style configurations.
-            fs::write(
-                run_dir.join("driver_model_path.txt"),
-                format!("{}\n", model_dir.display()),
-            )
-            .map_err(|e| {
-                format!(
-                    "Failed to write model path for {}: {}",
-                    run_name,
-                    e
-                )
-            })?;
+                    if !mock_model.is_file() {
+                        return Err(format!(
+                            "Required mock UPET model is missing: {}",
+                            mock_model.display()
+                        ));
+                    }
+
+                    fs::copy(
+                        &mock_model,
+                        member_package_dir.join("mock_trained_model.pt"),
+                    )
+                    .map_err(|e| {
+                        format!(
+                            "Failed to copy {} into {}: {}",
+                            mock_model.display(),
+                            member_package_dir.display(),
+                            e
+                        )
+                    })?;
+                }
+
+                Some(MdModelPackage::N2p2Inputs) => {
+                    fs::create_dir_all(&member_package_dir).map_err(|e| {
+                        format!(
+                            "Failed to create n2p2 model package directory {}: {}",
+                            member_package_dir.display(),
+                            e
+                        )
+                    })?;
+
+                    for file_name in ["input.data", "input.nn", "scaling.data"] {
+                        let source = model_dir.join(file_name);
+
+                        if !source.is_file() {
+                            return Err(format!(
+                                "Required n2p2 MD package file is missing: {}",
+                                source.display()
+                            ));
+                        }
+
+                        fs::copy(&source, member_package_dir.join(file_name)).map_err(|e| {
+                            format!(
+                                "Failed to copy {} into {}: {}",
+                                source.display(),
+                                member_package_dir.display(),
+                                e
+                            )
+                        })?;
+                    }
+
+                    let mut copied_weights = 0usize;
+
+                    for entry in fs::read_dir(&model_dir).map_err(|e| {
+                        format!(
+                            "Failed to read n2p2 model directory {}: {}",
+                            model_dir.display(),
+                            e
+                        )
+                    })? {
+                        let entry = entry.map_err(|e| {
+                            format!(
+                                "Failed to inspect n2p2 model directory {}: {}",
+                                model_dir.display(),
+                                e
+                            )
+                        })?;
+                        let path = entry.path();
+
+                        if !path.is_file() {
+                            continue;
+                        }
+
+                        let Some(file_name) = path.file_name().and_then(|name| name.to_str())
+                        else {
+                            continue;
+                        };
+
+                        if file_name.starts_with("weights.") && file_name.ends_with(".data") {
+                            fs::copy(&path, member_package_dir.join(file_name)).map_err(|e| {
+                                format!(
+                                    "Failed to copy {} into {}: {}",
+                                    path.display(),
+                                    member_package_dir.display(),
+                                    e
+                                )
+                            })?;
+                            copied_weights += 1;
+                        }
+                    }
+
+                    if copied_weights == 0 {
+                        return Err(format!(
+                            "No selected n2p2 weight files found in {}",
+                            model_dir.display()
+                        ));
+                    }
+
+                    if member_index == 0 {
+                        let driver_dir = run_dir.join("n2p2");
+
+                        fs::create_dir_all(&driver_dir).map_err(|e| {
+                            format!(
+                                "Failed to create n2p2 MD driver directory {}: {}",
+                                driver_dir.display(),
+                                e
+                            )
+                        })?;
+
+                        for file_name in ["input.data", "input.nn", "scaling.data"] {
+                            fs::copy(
+                                member_package_dir.join(file_name),
+                                driver_dir.join(file_name),
+                            )
+                            .map_err(|e| {
+                                format!(
+                                    "Failed to copy {} into {}: {}",
+                                    member_package_dir.join(file_name).display(),
+                                    driver_dir.display(),
+                                    e
+                                )
+                            })?;
+                        }
+
+                        for entry in fs::read_dir(&member_package_dir).map_err(|e| {
+                            format!(
+                                "Failed to read n2p2 member package directory {}: {}",
+                                member_package_dir.display(),
+                                e
+                            )
+                        })? {
+                            let entry = entry.map_err(|e| {
+                                format!(
+                                    "Failed to inspect n2p2 member package directory {}: {}",
+                                    member_package_dir.display(),
+                                    e
+                                )
+                            })?;
+                            let path = entry.path();
+
+                            if !path.is_file() {
+                                continue;
+                            }
+
+                            let Some(file_name) = path.file_name().and_then(|name| name.to_str())
+                            else {
+                                continue;
+                            };
+
+                            if file_name.starts_with("weights.") && file_name.ends_with(".data") {
+                                fs::copy(&path, driver_dir.join(file_name)).map_err(|e| {
+                                    format!(
+                                        "Failed to copy {} into {}: {}",
+                                        path.display(),
+                                        driver_dir.display(),
+                                        e
+                                    )
+                                })?;
+                            }
+                        }
+                    }
+                }
+
+                None => {}
+            }
         }
 
-        Self::create_md_array_script(
-            setup_dir,
-            &generation_dir,
-            gen_num,
-            committee_members,
-        )?;
+        Self::create_md_array_script(setup_dir, &generation_dir, gen_num, 1)?;
 
         Ok(generation_dir)
     }
@@ -189,15 +348,10 @@ impl LammpsManager {
         committee_members: usize,
     ) -> Result<PathBuf, String> {
         if committee_members == 0 {
-            return Err(
-                "Cannot create an MD array for zero committee members."
-                    .to_string(),
-            );
+            return Err("Cannot create an MD array for zero committee members.".to_string());
         }
 
-        let template_path = setup_dir
-            .join("jobscripts")
-            .join("md_array.sh.template");
+        let template_path = setup_dir.join("jobscripts").join("md_array.sh.template");
 
         if !template_path.is_file() {
             return Err(format!(
@@ -209,13 +363,7 @@ impl LammpsManager {
         let max_index = committee_members - 1;
         let script_path = generation_dir.join("submit_array.sh");
 
-        render_job_template(
-            &template_path,
-            &script_path,
-            gen_num,
-            max_index,
-        )
-        .map_err(|error| {
+        render_job_template(&template_path, &script_path, gen_num, max_index).map_err(|error| {
             format!(
                 "Failed to render MD job template {}: {}",
                 template_path.display(),
